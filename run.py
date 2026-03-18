@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import TypedDict, List, Dict, Optional, Literal
 
 # from config import load_app_config, AppConfig
-from jsonconfig import load_config, AppConfig
+from jsonconfig import load_config, AppConfig, save_config
 from ignore import add_ignore_id, is_ignored
 import re
 from uaforge.core.generator import UserAgentGenerator
@@ -25,7 +25,6 @@ cfg: AppConfig = load_config()
 
 Role = Literal["user", "assistant"]
 ChatType = Literal["t2t"]
-
 
 class ChatItem(TypedDict):
     id: str
@@ -176,10 +175,12 @@ default_headers = {
     "Connection": "keep-alive",
     "DNT": "1",
     "Referer": "https://chat.qwen.ai/",
+
     # kind of unnecessary as of 2026-03 (not widely adopted yet)
     # "Sec-Fetch-Dest": "empty",
     # "Sec-Fetch-Mode": "cors",
     # "Sec-Fetch-Site": "same-origin",
+
     # did this by merging the dicts below instead
     # "User-Agent": headers["User-Agent"],
     # "Sec-CH-UA": headers["Sec-CH-UA"],
@@ -188,6 +189,22 @@ default_headers = {
     "source": "web",
 }
 default_headers.update(headers)
+
+browser_loaders = {
+    "chrome": browser_cookie3.chrome,
+    "chromium": browser_cookie3.chromium,
+    "opera": browser_cookie3.opera,
+    "opera_gx": browser_cookie3.opera_gx,
+    "brave": browser_cookie3.brave,
+    "edge": browser_cookie3.edge,
+    "vivaldi": browser_cookie3.vivaldi,
+    "firefox": browser_cookie3.firefox,
+    "librewolf": browser_cookie3.librewolf,
+    "safari": browser_cookie3.safari,
+    "lynx": browser_cookie3.lynx,
+    "w3m": browser_cookie3.w3m,
+    "arc": browser_cookie3.arc,
+}
 
 
 def make_session() -> requests.Session:
@@ -200,10 +217,11 @@ def make_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(default_headers)
     if cfg.auth.use_browser_cookies:
-        if cfg.auth.browser == "chrome":
-            cj = browser_cookie3.chrome(domain_name="qwen.ai")
-        elif cfg.auth.browser == "firefox":
-            cj = browser_cookie3.firefox(domain_name="qwen.ai")
+        browser = cfg.auth.browser.lower()
+
+        loader = browser_loaders.get(browser)
+        if loader is not None:
+            cj = loader(domain_name="qwen.ai")
         else:
             cj = browser_cookie3.load(domain_name="qwen.ai")
     else:
@@ -226,6 +244,11 @@ def request_with_session(
     # s.cookies now includes any Set-Cookie from resp
     return resp
 
+def check_authorization(s: requests.Session) -> bool:
+    # if 401 then unauthorized
+    url = "https://chat.qwen.ai/api/v1/auths/"
+    response = request_with_session(s, "GET", url)
+    return response.status_code == 200
 
 def format_gmt_date(dt: datetime | None = None) -> str:
     """
@@ -342,16 +365,18 @@ def _normalized_content(message: MessageItem) -> str:
     return extract_between_quotes(message["content"]).strip()
 
 
-def get_user_messages(chat: ChatRecord) -> List[MessageItem]:
+def get_messages(chat: ChatRecord) -> List[MessageItem]:
     messages: List[MessageItem] = chat["chat"]["messages"] + list(
         chat["chat"]["history"]["messages"].values()
     )
     messages.sort(key=lambda m: m["timestamp"])
-    # keep only user role
-    users = [m for m in messages if m.get("role") == "user"]
+
+    # keep only messages with roles in cfg.fetch.message_roles
+    filtered_messages = [m for m in messages if m.get("role") in cfg.fetch.message_roles]
+
     # dedupe by normalized content and drop empties
     dedupe_by_content: dict[str, MessageItem] = {}
-    for m in users:
+    for m in filtered_messages:
         content = _normalized_content(m)
         if not content:
             continue
@@ -432,9 +457,13 @@ def fetch():
         f"Last fetch time: {cfg.fetch.last_fetch} ({datetime.fromtimestamp(cfg.fetch.last_fetch)})"
     )
     s = make_session()
+    if not check_authorization(s):
+        print("Unauthorized. Please check your cookies and try again.")
+        return
     fetched_urls = []
     chat_records = get_chat_records(s, last_fetch=cfg.fetch.last_fetch)
     print(f"Found {len(chat_records)} new chat records.")
+    max_timestamp = cfg.fetch.last_fetch
     for cr in chat_records:
         # print('#'*60)
         # print(f"Chat ID: {cr['id']}")
@@ -446,26 +475,15 @@ def fetch():
             print(f"Skipping chat {cr['id']} - in ignore list.")
             continue
 
-        # if json.dumps(chat).find(search_string) == -1:
-        #     print(f"Skipping chat {cr['id']} - does not contain search string.")
-        #     add_ignore_id(cr["id"])
-        #     continue
-
-        # for ss in cfg.search_strings:
-        #     if json.dumps(chat).find(ss) == -1:
-        #         print(f"Skipping chat {cr['id']} - does not contain search string '{ss}'.")
-        #         add_ignore_id(cr["id"])
-        #         continue
-
         if not matches_search(chat):
             print(f"Skipping chat {cr['id']} - does not match search criteria.")
             if cfg.fetch.ignore_processed:
                 add_ignore_id(cr["id"])
             continue
 
-        user_messages = get_user_messages(chat)
+        user_messages = get_messages(chat)
         if not user_messages:
-            print(f"No user messages found for chat {cr['id']}. Skipping.")
+            print(f"No messages found for chat {cr['id']}. Skipping.")
             if cfg.fetch.ignore_processed:
                 add_ignore_id(cr["id"])
             continue
@@ -508,12 +526,16 @@ def fetch():
                 f.write(md)
             # print(f"Wrote message {um['id']} to {filename}.")
 
-        # Update last_fetch
-        # if cr["created_at"] > last_fetch:
-        #     last_fetch = cr["created_at"]
-        #     set_value("last_fetch", str(last_fetch))
-        #     print(f"Updated last_fetch to {last_fetch}.")
+        if cr["created_at"] > max_timestamp:
+            max_timestamp = cr["created_at"]
+
         time.sleep(1)
+
+    # Update last_fetch
+    if cfg.fetch.update_last_fetch and max_timestamp > cfg.fetch.last_fetch:
+        cfg.fetch.last_fetch = max_timestamp
+        save_config(cfg)
+        print(f"Updated last_fetch to {cfg.fetch.last_fetch} ({datetime.fromtimestamp(cfg.fetch.last_fetch)}).")
 
     # add fetched_urls to del.txt
     if cfg.delete.add_fetched_chats_to_delete_list and len(fetched_urls) > 0:
@@ -546,8 +568,11 @@ def delete_chats():
 
     print(f"Found {len(urls)} chat URLs to delete.")
     s = make_session()
+    if not check_authorization(s):
+        print("Unauthorized. Please check your cookies and try again.")
+        return
     print("Fetching chat records for confirmation...")
-    chats = []
+    chats: list[ChatRecord] = []
     total = len(urls)
     for i, url in enumerate(urls, start=1):
         id = url.split("/")[-1]
@@ -564,10 +589,12 @@ def delete_chats():
 
     print()
     print("The following chats will be deleted:")
+    skipped_chats: list[str] = []
     for chat in chats:
-        user_messages = get_user_messages(chat)
+        user_messages = get_messages(chat)
         if not user_messages:
-            print(f"No user messages found for chat {chat['id']}. Skipping.")
+            print(f"No messages found for chat {chat['id']}. Skipping.")
+            skipped_chats.append(chat["id"])
             continue
         user_messages.sort(key=lambda m: m["timestamp"])
         first_message = user_messages[0]
@@ -593,6 +620,9 @@ def delete_chats():
 
     total = len(chats)
     for i, chat in enumerate(chats, start=1):
+        if chat["id"] in skipped_chats:
+            # print(f"Skipping chat {chat['id']} - no messages found.")
+            continue
         print(f"\rDeleting {i}/{total}: {chat['id']}", end="", flush=True)
         url = f"https://chat.qwen.ai/api/v2/chats/{chat['id']}"
         response = request_with_session(s, "DELETE", url)
@@ -613,9 +643,14 @@ if __name__ == "__main__":
         prog="qwen-dl", description="Fetch and process chat records from qwen.ai"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    
+    parser_init = subparsers.add_parser(
+        "init", help="Initialize config.jsonc with default values if it doesn't exist"
+    )
+    parser_init.set_defaults(func=lambda: load_config())
 
     parser_fetch = subparsers.add_parser(
-        "fetch", help="Fetch new chat records and save user messages as markdown files"
+        "fetch", help="Fetch new chat records and save messages as markdown files"
     )
     parser_fetch.set_defaults(func=fetch)
 

@@ -2,6 +2,9 @@ from pathlib import Path
 from dataclasses import dataclass
 import commentjson as json  # Allows comments in JSON files
 
+VALID_ROLES = {"user", "assistant", "system"}
+VALID_BROWSERS = {"chrome", "chromium", "opera", "opera_gx", "brave", "edge", "vivaldi", "firefox", "librewolf", "safari", "lynx", "w3m", "arc", "other"}
+VALID_SEARCH_MODES = {"any", "all"}
 
 @dataclass
 class AuthSection:
@@ -11,6 +14,7 @@ class AuthSection:
 
 @dataclass
 class FetchSection:
+    message_roles: list[str]
     last_fetch: int
     search_strings: list[str]
     search_mode: str
@@ -24,6 +28,7 @@ class FetchSection:
     chat_folder_name_template: str
     include_chat_header: bool
     extract_text_in_quotes: bool
+    update_last_fetch: bool
 
 
 @dataclass
@@ -42,13 +47,14 @@ class AppConfig:
 CONFIG_FILENAME = "config.jsonc"
 DEFAULTS = {
     "auth": {
-        "use_browser_cookies": True,  # else cookies.txt
-        "browser": "chrome",  # or "firefox" or "other", only used if use_browser_cookies is True
+        "use_browser_cookies": True,
+        "browser": "chrome",
     },
     "fetch": {
+        "message_roles": ["user", "assistant"],
         "last_fetch": "1764460800",
         "search_strings": [],
-        "search_mode": "any",  # "any" or "all"
+        "search_mode": "any",
         "output_directory": "./output",
         "output_template": "[[content]]",
         "timestamp_format": "%-d %b %Y | %I:%M:%S %p",
@@ -59,6 +65,7 @@ DEFAULTS = {
         "chat_folder_name_template": "[[created_at]]_[[chat_id]]",
         "include_chat_header": False,
         "extract_text_in_quotes": False,
+        "update_last_fetch": True,
     },
     "delete": {
         "add_fetched_chats_to_delete_list": False,
@@ -87,6 +94,19 @@ def load_config() -> AppConfig:
     auth = {**DEFAULTS["auth"], **cfg.get("auth", {})}
     fetch = {**DEFAULTS["fetch"], **cfg.get("fetch", {})}
     delete = {**DEFAULTS["delete"], **cfg.get("delete", {})}
+    
+    if not isinstance(fetch["message_roles"], list) or not all(isinstance(role, str) for role in fetch["message_roles"]):
+        raise ValueError("Invalid message_roles in config: must be a list of strings")
+    
+    if fetch["search_mode"] not in VALID_SEARCH_MODES:
+        raise ValueError("Invalid search_mode in config: must be 'any' or 'all'")
+    
+    if auth["browser"] not in VALID_BROWSERS:
+        raise ValueError("Invalid browser in config: must be 'chrome', 'firefox', or 'other'")
+    
+    if any(role not in VALID_ROLES for role in fetch["message_roles"]):
+        raise ValueError(f"Invalid message_roles in config: each role must be one of {VALID_ROLES}")
+    
 
     return AppConfig(
         auth=AuthSection(
@@ -94,6 +114,7 @@ def load_config() -> AppConfig:
             browser=auth["browser"],
         ),
         fetch=FetchSection(
+            message_roles=fetch["message_roles"],
             last_fetch=_parse_int(fetch["last_fetch"]),
             search_strings=_parse_string_list(fetch["search_strings"]),
             search_mode=fetch["search_mode"],
@@ -107,6 +128,7 @@ def load_config() -> AppConfig:
             chat_folder_name_template=fetch["chat_folder_name_template"],
             include_chat_header=_parse_bool(fetch["include_chat_header"]),
             extract_text_in_quotes=_parse_bool(fetch["extract_text_in_quotes"]),
+            update_last_fetch=_parse_bool(fetch["update_last_fetch"]),
         ),
         delete=DeleteSection(
             add_fetched_chats_to_delete_list=_parse_bool(
@@ -124,6 +146,7 @@ def save_config(config: AppConfig) -> None:
             "browser": config.auth.browser,
         },
         "fetch": {
+            "message_roles": config.fetch.message_roles,
             "last_fetch": str(config.fetch.last_fetch),
             "search_strings": config.fetch.search_strings,
             "search_mode": config.fetch.search_mode,
@@ -137,12 +160,26 @@ def save_config(config: AppConfig) -> None:
             "chat_folder_name_template": config.fetch.chat_folder_name_template,
             "include_chat_header": config.fetch.include_chat_header,
             "extract_text_in_quotes": config.fetch.extract_text_in_quotes,
+            "update_last_fetch": config.fetch.update_last_fetch,
         },
         "delete": {
             "add_fetched_chats_to_delete_list": config.delete.add_fetched_chats_to_delete_list,
             "confirm_delete": config.delete.confirm_delete,
         },
     }
+    
+    if not isinstance(data["fetch"]["message_roles"], list) or not all(isinstance(role, str) for role in data["fetch"]["message_roles"]):
+        raise ValueError("Invalid message_roles in config: must be a list of strings")
+    
+    if data["fetch"]["search_mode"] not in VALID_SEARCH_MODES:
+        raise ValueError("Invalid search_mode in config: must be 'any' or 'all'")
+    
+    if data["auth"]["browser"] not in VALID_BROWSERS:
+        raise ValueError("Invalid browser in config: must be 'chrome', 'firefox', or 'other'")
+    
+    if any(role not in VALID_ROLES for role in data["fetch"]["message_roles"]):
+        raise ValueError(f"Invalid message_roles in config: each role must be one of {VALID_ROLES}")
+    
     with _config_path().open("w") as f:
         json.dump(data, f, indent=4)
 
