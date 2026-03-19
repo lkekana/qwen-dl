@@ -1,10 +1,27 @@
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Optional
 import commentjson as json  # Allows comments in JSON files
 
 VALID_ROLES = {"user", "assistant", "system"}
-VALID_BROWSERS = {"chrome", "chromium", "opera", "opera_gx", "brave", "edge", "vivaldi", "firefox", "librewolf", "safari", "lynx", "w3m", "arc", "other"}
+VALID_BROWSERS = {
+    "chrome",
+    "chromium",
+    "opera",
+    "opera_gx",
+    "brave",
+    "edge",
+    "vivaldi",
+    "firefox",
+    "librewolf",
+    "safari",
+    "lynx",
+    "w3m",
+    "arc",
+    "other",
+}
 VALID_SEARCH_MODES = {"any", "all"}
+
 
 @dataclass
 class AuthSection:
@@ -78,35 +95,86 @@ def _config_path() -> Path:
     return Path.cwd() / CONFIG_FILENAME
 
 
-def _ensure_config_exists() -> None:
+def default_config_exists() -> bool:
+    return _config_path().exists()
+
+
+def create_default_config_if_not_exists() -> None:
     cfg_path = _config_path()
     if not cfg_path.exists():
         with cfg_path.open("w") as f:
             json.dump(DEFAULTS, f, indent=4)
 
 
-def load_config() -> AppConfig:
-    _ensure_config_exists()
-    with _config_path().open("r") as f:
+def default_config() -> AppConfig:
+    return AppConfig(
+        auth=AuthSection(
+            use_browser_cookies=DEFAULTS["auth"]["use_browser_cookies"],
+            browser=DEFAULTS["auth"]["browser"],
+        ),
+        fetch=FetchSection(
+            message_roles=DEFAULTS["fetch"]["message_roles"],
+            last_fetch=_parse_int(DEFAULTS["fetch"]["last_fetch"]),
+            search_strings=_parse_string_list(DEFAULTS["fetch"]["search_strings"]),
+            search_mode=DEFAULTS["fetch"]["search_mode"],
+            output_directory=Path(DEFAULTS["fetch"]["output_directory"]),
+            output_template=_unescape_chars(DEFAULTS["fetch"]["output_template"]),
+            timestamp_format=DEFAULTS["fetch"]["timestamp_format"],
+            output_filename=DEFAULTS["fetch"]["output_filename"],
+            fetch_new_only=_parse_bool(DEFAULTS["fetch"]["fetch_new_only"]),
+            ignore_processed=_parse_bool(DEFAULTS["fetch"]["ignore_processed"]),
+            use_chat_subfolder=_parse_bool(DEFAULTS["fetch"]["use_chat_subfolder"]),
+            chat_folder_name_template=DEFAULTS["fetch"]["chat_folder_name_template"],
+            include_chat_header=_parse_bool(DEFAULTS["fetch"]["include_chat_header"]),
+            extract_text_in_quotes=_parse_bool(
+                DEFAULTS["fetch"]["extract_text_in_quotes"]
+            ),
+            update_last_fetch=_parse_bool(DEFAULTS["fetch"]["update_last_fetch"]),
+        ),
+        delete=DeleteSection(
+            add_fetched_chats_to_delete_list=_parse_bool(
+                DEFAULTS["delete"]["add_fetched_chats_to_delete_list"]
+            ),
+            confirm_delete=_parse_bool(DEFAULTS["delete"]["confirm_delete"]),
+        ),
+    )
+
+
+def load_config(path: Optional[Path] = None) -> AppConfig:
+    if path is not None:
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found at specified path: {path}")
+        else:
+            config_path = path
+    else:
+        create_default_config_if_not_exists()
+        config_path = _config_path()
+
+    with config_path.open("r") as f:
         cfg = json.load(f)
 
     # sections with fallback to DEFAULTS
     auth = {**DEFAULTS["auth"], **cfg.get("auth", {})}
     fetch = {**DEFAULTS["fetch"], **cfg.get("fetch", {})}
     delete = {**DEFAULTS["delete"], **cfg.get("delete", {})}
-    
-    if not isinstance(fetch["message_roles"], list) or not all(isinstance(role, str) for role in fetch["message_roles"]):
+
+    if not isinstance(fetch["message_roles"], list) or not all(
+        isinstance(role, str) for role in fetch["message_roles"]
+    ):
         raise ValueError("Invalid message_roles in config: must be a list of strings")
-    
+
     if fetch["search_mode"] not in VALID_SEARCH_MODES:
         raise ValueError("Invalid search_mode in config: must be 'any' or 'all'")
-    
+
     if auth["browser"] not in VALID_BROWSERS:
-        raise ValueError("Invalid browser in config: must be 'chrome', 'firefox', or 'other'")
-    
+        raise ValueError(
+            "Invalid browser in config: must be 'chrome', 'firefox', or 'other'"
+        )
+
     if any(role not in VALID_ROLES for role in fetch["message_roles"]):
-        raise ValueError(f"Invalid message_roles in config: each role must be one of {VALID_ROLES}")
-    
+        raise ValueError(
+            f"Invalid message_roles in config: each role must be one of {VALID_ROLES}"
+        )
 
     return AppConfig(
         auth=AuthSection(
@@ -167,19 +235,25 @@ def save_config(config: AppConfig) -> None:
             "confirm_delete": config.delete.confirm_delete,
         },
     }
-    
-    if not isinstance(data["fetch"]["message_roles"], list) or not all(isinstance(role, str) for role in data["fetch"]["message_roles"]):
+
+    if not isinstance(data["fetch"]["message_roles"], list) or not all(
+        isinstance(role, str) for role in data["fetch"]["message_roles"]
+    ):
         raise ValueError("Invalid message_roles in config: must be a list of strings")
-    
+
     if data["fetch"]["search_mode"] not in VALID_SEARCH_MODES:
         raise ValueError("Invalid search_mode in config: must be 'any' or 'all'")
-    
+
     if data["auth"]["browser"] not in VALID_BROWSERS:
-        raise ValueError("Invalid browser in config: must be 'chrome', 'firefox', or 'other'")
-    
+        raise ValueError(
+            "Invalid browser in config: must be 'chrome', 'firefox', or 'other'"
+        )
+
     if any(role not in VALID_ROLES for role in data["fetch"]["message_roles"]):
-        raise ValueError(f"Invalid message_roles in config: each role must be one of {VALID_ROLES}")
-    
+        raise ValueError(
+            f"Invalid message_roles in config: each role must be one of {VALID_ROLES}"
+        )
+
     with _config_path().open("w") as f:
         json.dump(data, f, indent=4)
 

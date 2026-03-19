@@ -48,10 +48,16 @@ uv run run.py init
 # or python3 run.py init
 ```
 
-- fetch your chats
+- fetch your chats (uses `config.jsonc` if it exists, otherwise creates default)
 ```bash
 uv run run.py fetch
 # or python3 run.py fetch
+```
+
+- use a specific config file
+```bash
+uv run run.py -c /path/to/custom.jsonc fetch
+# or python3 run.py -c /path/to/custom.jsonc fetch
 ```
 
 - (optionally) delete chats listed in `del.txt`

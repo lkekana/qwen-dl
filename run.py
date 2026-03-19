@@ -6,9 +6,14 @@ import requests
 import json
 from datetime import datetime
 from typing import TypedDict, List, Dict, Optional, Literal
-
-# from config import load_app_config, AppConfig
-from jsonconfig import load_config, AppConfig, save_config
+from jsonconfig import (
+    AppConfig,
+    load_config,
+    save_config,
+    default_config,
+    default_config_exists,
+    create_default_config_if_not_exists,
+)
 from ignore import add_ignore_id, is_ignored
 import re
 from uaforge.core.generator import UserAgentGenerator
@@ -20,11 +25,13 @@ headers = identity.get_headers()
 # print(f"Using User-Agent: {headers['User-Agent']}")
 # print(f"Using other headers: {headers}")
 
-cfg: AppConfig = load_config()
-# print(f"Configuration loaded: {cfg}")
+pre_cfg: Optional[AppConfig] = load_config() if default_config_exists() else None
+# print(f"Configuration loaded: {pre_cfg}")
+cfg: AppConfig = default_config()
 
 Role = Literal["user", "assistant"]
 ChatType = Literal["t2t"]
+
 
 class ChatItem(TypedDict):
     id: str
@@ -244,11 +251,13 @@ def request_with_session(
     # s.cookies now includes any Set-Cookie from resp
     return resp
 
+
 def check_authorization(s: requests.Session) -> bool:
     # if 401 then unauthorized
     url = "https://chat.qwen.ai/api/v1/auths/"
     response = request_with_session(s, "GET", url)
     return response.status_code == 200
+
 
 def format_gmt_date(dt: datetime | None = None) -> str:
     """
@@ -319,7 +328,7 @@ def get_chat_records(s: requests.Session, last_fetch: int = 0) -> List[ChatItem]
         if len(data) < 60:
             break
         page += 1
-    
+
     print()
     return result
 
@@ -372,7 +381,9 @@ def get_messages(chat: ChatRecord) -> List[MessageItem]:
     messages.sort(key=lambda m: m["timestamp"])
 
     # keep only messages with roles in cfg.fetch.message_roles
-    filtered_messages = [m for m in messages if m.get("role") in cfg.fetch.message_roles]
+    filtered_messages = [
+        m for m in messages if m.get("role") in cfg.fetch.message_roles
+    ]
 
     # dedupe by normalized content and drop empties
     dedupe_by_content: dict[str, MessageItem] = {}
@@ -451,6 +462,11 @@ def hydrate_chat_folder_name_template(template: str, chat: ChatRecord) -> str:
 
 
 def fetch():
+    if cfg is None:
+        print(
+            "Error: No configuration loaded. Please specify a config file with -c/--config or ensure config.jsonc exists."
+        )
+        return
     if not cfg.fetch.output_directory.exists():
         cfg.fetch.output_directory.mkdir(parents=True)
     print(
@@ -535,7 +551,9 @@ def fetch():
     if cfg.fetch.update_last_fetch and max_timestamp > cfg.fetch.last_fetch:
         cfg.fetch.last_fetch = max_timestamp
         save_config(cfg)
-        print(f"Updated last_fetch to {cfg.fetch.last_fetch} ({datetime.fromtimestamp(cfg.fetch.last_fetch)}).")
+        print(
+            f"Updated last_fetch to {cfg.fetch.last_fetch} ({datetime.fromtimestamp(cfg.fetch.last_fetch)})."
+        )
 
     # add fetched_urls to del.txt
     if cfg.delete.add_fetched_chats_to_delete_list and len(fetched_urls) > 0:
@@ -547,6 +565,11 @@ def fetch():
 
 
 def delete_chats():
+    if cfg is None:
+        print(
+            "Error: No configuration loaded. Please specify a config file with -c/--config or ensure config.jsonc exists."
+        )
+        return
     del_path = Path("del.txt")
     if not del_path.exists():
         print("del.txt not found. Exiting.")
@@ -635,19 +658,70 @@ def delete_chats():
     print("Done.")
 
 
-if __name__ == "__main__":
-    # print("Starting qwen-dl...")
-    # fetch()
-    # delete_chats()
+def init_config():
+    if default_config_exists():
+        print("Default config.jsonc already exists. No action taken.")
+    else:
+        # save_config(default_config())
+        create_default_config_if_not_exists()
+        print("Created default config.jsonc.")
+
+
+def get_effective_config(specified_config_path: Optional[Path]) -> AppConfig:
+    """
+    Determine which config to use based on CLI arguments.
+
+    - If a config file is specified, use it (exit if it doesn't exist)
+    - If no config specified and default exists, use default
+    - If no config specified and default doesn't exist, create default and use it
+    """
+    if specified_config_path is None:
+        if pre_cfg is not None:
+            print("Loaded config from config.jsonc.")
+            return pre_cfg
+        else:
+            print(
+                "No config file specified and no default config found. Will create config.jsonc with default values."
+            )
+            return (
+                load_config()
+            )  # This will create the default config if it doesn't exist
+
+    else:
+        # User specified a config file
+        if not specified_config_path.exists():
+            print(
+                f"Error: Specified config file '{specified_config_path}' does not exist."
+            )
+            import sys
+
+            sys.exit(1)
+        print(f"Loaded config from: {specified_config_path}")
+        return load_config(specified_config_path)
+
+
+def main():
+    global cfg
+
     parser = argparse.ArgumentParser(
         prog="qwen-dl", description="Fetch and process chat records from qwen.ai"
     )
+
+    # CLI args
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        help="Path to a specific config file to use (overrides default config.jsonc)",
+    )
+
+    # CLI commands
     subparsers = parser.add_subparsers(dest="command", required=True)
-    
+
     parser_init = subparsers.add_parser(
         "init", help="Initialize config.jsonc with default values if it doesn't exist"
     )
-    parser_init.set_defaults(func=lambda: load_config())
+    parser_init.set_defaults(func=init_config)
 
     parser_fetch = subparsers.add_parser(
         "fetch", help="Fetch new chat records and save messages as markdown files"
@@ -660,4 +734,12 @@ if __name__ == "__main__":
     parser_delete.set_defaults(func=delete_chats)
 
     args = parser.parse_args()
+
+    # Load effective config based on CLI arguments
+    cfg = get_effective_config(args.config)
+
     args.func()
+
+
+if __name__ == "__main__":
+    main()
