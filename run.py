@@ -322,15 +322,20 @@ def get_chat_records(s: requests.Session, last_fetch: int = 0) -> List[ChatItem]
             break
         if len(data) == 0:
             break
-        # Filter by last_fetch
-        filtered = [c for c in data if c["created_at"] > last_fetch]
-        result.extend(filtered)
+        if data[-1]["updated_at"] <= last_fetch:
+            break
+        if data[0]["updated_at"] <= last_fetch:
+            break
+        result.extend(data)
         if len(data) < 60:
             break
         page += 1
 
     print()
-    return result
+
+    # Filter by last_fetch
+    filtered = [c for c in result if c["updated_at"] >= last_fetch]
+    return filtered
 
 
 def get_chat(chat_id: str, s: requests.Session) -> ChatRecord:
