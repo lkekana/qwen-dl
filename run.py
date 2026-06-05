@@ -320,13 +320,13 @@ def get_chat_records(s: requests.Session, last_fetch: int = 0) -> List[ChatItem]
         data: List[ChatItem] = res_json["data"]
         if not data:
             break
+        result.extend(data)
         if len(data) == 0:
             break
         if data[-1]["updated_at"] <= last_fetch:
             break
         if data[0]["updated_at"] <= last_fetch:
             break
-        result.extend(data)
         if len(data) < 60:
             break
         page += 1
