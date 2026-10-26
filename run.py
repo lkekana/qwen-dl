@@ -18,6 +18,8 @@ from ignore import add_ignore_id, is_ignored
 import re
 from uaforge.core.generator import UserAgentGenerator
 import http.cookiejar as cookielib
+import uuid
+from typeguard import check_type, TypeCheckError
 
 agent = UserAgentGenerator()
 identity = agent.generate()
@@ -32,6 +34,22 @@ cfg: AppConfig = default_config()
 Role = Literal["user", "assistant"]
 ChatType = Literal["t2t"]
 
+class QwenResponse(TypedDict):
+    success: bool
+    request_id: str
+    data: object
+
+class AuthTokenResponse(TypedDict):
+    access_token: str
+    refresh_token: str
+    id: str
+    email: str
+    name: str
+    role: Role
+    profile_image_url: str
+    birthday: Optional[str]
+    is_new_user: bool
+    merge_status: int
 
 class ChatItem(TypedDict):
     id: str
@@ -39,22 +57,11 @@ class ChatItem(TypedDict):
     updated_at: int
     created_at: int
     chat_type: ChatType
-    project_id: str
+    project_id: Optional[str]
     pinned: bool
-
-
-class ChatsResponse(TypedDict):
-    success: bool
-    request_id: str
-    data: List[ChatItem]
-
-
-class FileMeta(TypedDict, total=False):
-    name: str
-    size: int
-    content_type: str
-    parse_meta: Dict[str, str]
-
+    content: Optional[str]
+    highlight_indexes: Optional[List[int]]
+    message_id: Optional[str]
 
 class FileObj(TypedDict):
     created_at: int
@@ -63,9 +70,13 @@ class FileObj(TypedDict):
     hash: Optional[str]
     id: str
     user_id: str
-    meta: FileMeta
+    meta: Optional[object]
     update_at: int
-
+    lastModified: int
+    name: str
+    webkitRelativePath: str
+    size: int
+    type: str
 
 class MessageFile(TypedDict):
     id: str
@@ -85,12 +96,14 @@ class MessageFile(TypedDict):
     showType: str
     uploadTaskId: str
 
-
 class FeatureConfig(TypedDict):
     thinking_enabled: bool
     output_schema: str
     instructions: Optional[str]
     research_mode: str
+    auto_thinking: bool
+    thinking_mode: str
+    thinking_format: str
     auto_search: bool
 
 
@@ -128,7 +141,7 @@ class MessageItem(TypedDict, total=False):
     is_stop: bool
     edited: bool
     error: Optional[str]
-    meta: Dict[str, object]
+    meta: Optional[object]
     extra: Dict[str, object]
     feedbackId: Optional[str]
     turn_id: Optional[str]
@@ -139,23 +152,25 @@ class MessageItem(TypedDict, total=False):
     models: Optional[List[str]]
     files: List[MessageFile]
 
+class Pagination(TypedDict):
+    enabled: bool
+    oldest_id: str
+    newest_id: str
+    has_more_older: bool
+    has_more_newer: bool
+    path_count: int
 
 class History(TypedDict):
     messages: Dict[str, MessageItem]
     currentId: str
     currentResponseIds: List[str]
+    pagination: Optional[Pagination]
 
 
 class ChatObj(TypedDict):
     history: History
     models: List[str]
     messages: List[MessageItem]
-
-
-class MetaObj(TypedDict):
-    timestamp: int
-    tags: List[str]
-
 
 class ChatRecord(TypedDict):
     id: str
@@ -167,14 +182,16 @@ class ChatRecord(TypedDict):
     share_id: Optional[str]
     archived: bool
     pinned: bool
-    meta: MetaObj
+    meta: Optional[object]
     folder_id: Optional[str]
     currentResponseIds: List[str]
     currentId: str
     chat_type: ChatType
     models: Optional[List[str]]
-    project_id: str
+    project_id: Optional[str]
+    data_source: Optional[str]
 
+API_CLIENT_VERSION = "0.3.22"
 
 default_headers = {
     "Accept": "application/json, text/plain, */*",
@@ -182,6 +199,7 @@ default_headers = {
     "Connection": "keep-alive",
     "DNT": "1",
     "Referer": "https://chat.qwen.ai/",
+    "Origin": "https://chat.qwen.ai",
 
     # kind of unnecessary as of 2026-03 (not widely adopted yet)
     # "Sec-Fetch-Dest": "empty",
@@ -194,6 +212,7 @@ default_headers = {
     # "Sec-CH-UA-Mobile": headers["Sec-CH-UA-Mobile"],
     # "Sec-CH-UA-Platform": headers["Sec-CH-UA-Platform"],
     "source": "web",
+    "version": API_CLIENT_VERSION,
 }
 default_headers.update(headers)
 
@@ -212,7 +231,15 @@ browser_loaders = {
     "w3m": browser_cookie3.w3m,
     "arc": browser_cookie3.arc,
 }
+auth_token: Optional[str] = None
 
+def ensure_type(value, expected_type) -> bool:
+    try:
+        check_type(value, expected_type)
+    except TypeCheckError as e:
+        print(f"Type check failed: {e}")
+        return False
+    return True
 
 def make_session() -> requests.Session:
     """
@@ -254,8 +281,67 @@ def request_with_session(
 
 def check_authorization(s: requests.Session) -> bool:
     # if 401 then unauthorized
-    url = "https://chat.qwen.ai/api/v1/auths/"
-    response = request_with_session(s, "GET", url)
+    url = "https://chat.qwen.ai/api/v2/users/status"
+    r1 = request_with_session(s, "POST", url, json={})
+    if r1.status_code == 401:
+        print("Unauthorized. Please check your cookies and try again.")
+        return False
+    if r1.status_code != 200:
+        print(
+            f"Unexpected response from status check: {r1.status_code} {r1.text}. Please check your cookies and try again."
+        )
+        return False
+
+    if not ensure_type(r1.json(), QwenResponse):
+        print("Unexpected response structure from status check. Please check your cookies and try again.")
+        return False
+
+    status_response: QwenResponse = r1.json()
+    if not status_response.get("success"):
+        print("Authorization check failed. Could not verify user status. Please check your cookies and try again.")
+        return False
+
+    x_request_headers = {
+        "Host": "auth.qwen.ai",
+        "X-Request-Id": str(uuid.uuid4()),
+        "X-Request-Origin": "https://chat.qwen.ai",
+    }
+    
+    url = "https://auth.qwen.ai/api/v2/auths/refresh"
+    r2 = request_with_session(s, "GET", url, headers=x_request_headers)
+    if r2.status_code == 401:
+        print("Auth refresh failed. Please check your cookies and try again.")
+        return False
+    if r2.status_code != 200:
+        print(
+            f"Unexpected response from auth refresh: {r2.status_code} {r2.text}. Please check your cookies and try again."
+        )
+        return False
+    
+    if not ensure_type(r2.json(), QwenResponse):
+        print("Unexpected response structure while getting auth token. Please check your cookies and try again.")
+        return False
+
+    refresh_response: QwenResponse = r2.json()
+    if not refresh_response.get("success"):
+        print("Authorization refresh failed. Please check your cookies and try again.")
+        return False
+
+    if not ensure_type(refresh_response.get("data"), AuthTokenResponse):
+        print("Unexpected auth token structure. Please check your cookies and try again.")
+        return False
+    auth: AuthTokenResponse = refresh_response["data"]
+    
+    global auth_token
+    auth_token = auth.get("access_token")
+    if not auth_token:
+        print("Authorization refresh did not return an access token. Please check your cookies and try again.")
+        return False
+
+    url = "https://auth.qwen.ai/api/v2/auths/"
+    x_request_headers["Authorization"] = f"Bearer {auth_token}"
+    x_request_headers["X-Request-Id"] = str(uuid.uuid4())
+    response = request_with_session(s, "GET", url, headers=x_request_headers)
     return response.status_code == 200
 
 
@@ -307,17 +393,35 @@ def get_chat_records(s: requests.Session, last_fetch: int = 0) -> List[ChatItem]
         url = f"https://chat.qwen.ai/api/v2/chats/?page={page}&exclude_project=true"
         # print(url)
         print(f"\rFetching chats... (page {page})", end="", flush=True)
-        response = request_with_session(s, "GET", url)
+        x_request_headers = {
+            "Authorization": f"Bearer {auth_token}",
+            "Host": "chat.qwen.ai",
+            "X-Request-Id": str(uuid.uuid4()),
+        }
+        response = request_with_session(s, "GET", url, headers=x_request_headers)
         if response.status_code != 200:
             print()
             raise Exception(
                 f"Failed to fetch chats: {response.status_code} {response.text}"
             )
-        res_json: ChatsResponse = response.json()
+        if not ensure_type(response.json(), QwenResponse):
+            print()
+            raise Exception(
+                f"Unexpected response structure while fetching chats. Please check your cookies and try again."
+            )
+
+        res_json: QwenResponse = response.json()
         if not res_json.get("success"):
             print()
             raise Exception(f"API returned error: {response.text}")
+
+        if not ensure_type(res_json.get("data"), List[ChatItem]):
+            print()
+            raise Exception(
+                f"Unexpected data structure while fetching chats. Please check your cookies and try again."
+            )
         data: List[ChatItem] = res_json["data"]
+
         if not data:
             break
         result.extend(data)
@@ -340,7 +444,12 @@ def get_chat_records(s: requests.Session, last_fetch: int = 0) -> List[ChatItem]
 
 def get_chat(chat_id: str, s: requests.Session) -> ChatRecord:
     url = f"https://chat.qwen.ai/api/v2/chats/{chat_id}"
-    response = request_with_session(s, "GET", url)
+    x_request_headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Host": "chat.qwen.ai",
+        "X-Request-Id": str(uuid.uuid4()),
+    }
+    response = request_with_session(s, "GET", url, headers=x_request_headers)
     if response.status_code != 200:
         raise Exception(
             f"Failed to fetch chat {chat_id}: {response.status_code} {response.text}"
@@ -348,6 +457,10 @@ def get_chat(chat_id: str, s: requests.Session) -> ChatRecord:
     result = response.json()
     if not result.get("success"):
         raise Exception(f"API returned error: {response.text}")
+    if not ensure_type(result.get("data"), ChatRecord):
+        raise Exception(
+            f"Unexpected data structure while fetching chat {chat_id}. Please check your cookies and try again."
+        )
     return response.json()["data"]
 
 
@@ -653,7 +766,12 @@ def delete_chats():
             continue
         print(f"\rDeleting {i}/{total}: {chat['id']}", end="", flush=True)
         url = f"https://chat.qwen.ai/api/v2/chats/{chat['id']}"
-        response = request_with_session(s, "DELETE", url)
+        x_request_headers = {
+            "Authorization": f"Bearer {auth_token}",
+            "Host": "chat.qwen.ai",
+            "X-Request-Id": str(uuid.uuid4()),
+        }
+        response = request_with_session(s, "DELETE", url, headers=x_request_headers)
         if response.status_code != 200:
             print(
                 f"Failed to delete chat {chat['id']}: {response.status_code} {response.text}"
